@@ -22,7 +22,20 @@ on:
     types:
      - completed
 
-permissions: read-all
+permissions:
+  actions: read
+  checks: read
+  contents: read
+  deployments: read
+  id-token: write
+  issues: read
+  discussions: read
+  packages: read
+  pages: read
+  pull-requests: read
+  repository-projects: read
+  security-events: read
+  statuses: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.after }}
@@ -243,6 +256,41 @@ jobs:
           build-args: |
             NOSTRIP=1
             OPERATOR_VARIANT=${{ matrix.name }}
+
+      - name: Install Bom and generate SBOM
+        shell: bash
+        run: |
+          curl -sSL --remote-name-all https://github.com/kubernetes-sigs/bom/releases/download/v0.3.0/bom-linux-amd64.tar.gz
+          sudo tar xzvfC bom-linux-amd64.tar.gz /usr/local/bin
+          rm bom-linux-amd64.tar.gz
+          bom generate -o sbom_source_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx \
+          --dirs=.
+          bom generate -o sbom_image_ci_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx \
+          --image=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}
+          bom generate -o sbom_image_ci_race_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx \
+          --image=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}-race
+          bom generate -o sbom_image_ci_unstripped_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx \
+          --image=quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}-unstripped
+          
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@ced07f21fb1da67979f539bbc6304c16c0677e76
+      
+      - name: Attach SBOM to container images
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign attest --type spdx -predicate sbom_source_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}
+          cosign attest --type spdx -predicate sbom_image_ci_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}
+          cosign attest --type spdx -predicate sbom_image_ci_race_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}-race
+          cosign attest --type spdx -predicate sbom_image_ci_unstripped_${{ matrix.name }}_${{ steps.tag.outputs.tag }}.spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}-unstripped
+
+      - name: Verify SBOM attestation
+        env:
+          COSIGN_EXPERIMENTAL: "true"
+        run: |
+          cosign verify-attestation --type spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}
+          cosign verify-attestation --type spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}-race
+          cosign verify-attestation --type spdx quay.io/${{ env.QUAY_ORGANIZATION_DEV }}/${{ matrix.name }}-ci:${{ steps.tag.outputs.tag }}-unstripped
 
       - name: CI Image Releases digests
         if: ${{ github.event_name == 'pull_request_target' }}
